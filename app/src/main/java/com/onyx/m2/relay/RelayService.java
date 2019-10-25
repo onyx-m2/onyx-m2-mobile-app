@@ -52,7 +52,7 @@ public class RelayService extends Service {
     private BluetoothGattCharacteristic serialCharacteristic;
     private Queue<ByteString> serialWriteQueue;
     private boolean serialWriteInFlight;
-    private byte[] incompleteSerialMessage;
+    private byte[] inboundSerialBuffer;
 
     private OkHttpClient webClient;
     private WebSocket webSocket;
@@ -182,7 +182,6 @@ public class RelayService extends Service {
                         if (uuid.equals(DFROBOT_SERIAL_UUID) && (properties & PROPERTY_NOTIFY) == PROPERTY_NOTIFY) {
                             Log.d(TAG, "     ^^^ DFRobot Serial");
                             serialCharacteristic = characteristic;
-                            gatt.setCharacteristicNotification(characteristic, true);
                             connectWebService();
                         }
                     }
@@ -195,8 +194,8 @@ public class RelayService extends Service {
             Log.d(TAG, String.format("Chanacteristic read, status: %d", status));
         }
 
-        public String byteArrayToHex(byte[] a) {
-            StringBuilder sb = new StringBuilder(a.length * 2);
+        public String byteArrayToHex(byte[] a, int len) {
+            StringBuilder sb = new StringBuilder(len * 3);
             for(byte b: a)
                 sb.append(String.format("%02x ", b));
             return sb.toString();
@@ -206,25 +205,62 @@ public class RelayService extends Service {
         public void onCharacteristicChanged(BluetoothGatt gatt, BluetoothGattCharacteristic characteristic) {
             final int CAN_MSG_LENGTH_OFFSET = 6;
             final int CAN_MSG_SIZE = 7;
-            Log.d(TAG, String.format("Characteristic changed: %s", characteristic.getUuid().toString()));
+            final int CAN_MSG_MAX_DATA_SIZE = 8;
+            final int CAN_MSG_MAX_SIZE = CAN_MSG_SIZE + CAN_MSG_MAX_DATA_SIZE;
+
             byte[] data = characteristic.getValue();
             if (data != null && data.length > 0) {
-                Log.i(TAG, String.format("m2 -> (%d) %s", data.length, byteArrayToHex(data)));
-                byte[] messageToSend = null;
-                if (incompleteSerialMessage == null) {
-                    if (data[CAN_MSG_LENGTH_OFFSET] != data.length - CAN_MSG_SIZE) {
-                        incompleteSerialMessage = data;
-                    } else {
-                        messageToSend = data;
-                    }
-                } else {
-                    messageToSend = new byte[incompleteSerialMessage.length + data.length];
-                    System.arraycopy(incompleteSerialMessage, 0, messageToSend , 0, incompleteSerialMessage.length);
-                    System.arraycopy(data, 0, messageToSend , incompleteSerialMessage.length, data.length);
-                    incompleteSerialMessage = null;
+                Log.d(TAG, String.format("m2 -> (%d) %s", data.length, byteArrayToHex(data, data.length)));
+
+                // append the new data to the existing data in the inbound serial buffer
+                if (inboundSerialBuffer != null) {
+                    byte[] inboundData = new byte[inboundSerialBuffer.length + data.length];
+                    System.arraycopy(inboundSerialBuffer, 0, inboundData, 0, inboundSerialBuffer.length);
+                    System.arraycopy(data, 0, inboundData, inboundSerialBuffer.length, data.length);
+                    inboundSerialBuffer = inboundData;
                 }
-                if (webSocketOpen && messageToSend != null) {
-                    webSocket.send(ByteString.of(data));
+                else {
+                    inboundSerialBuffer = data;
+                }
+
+                // loop on incoming data until we've exhausted what's there
+                while (true) {
+
+                    // if there isn't even enough data to lookup the message length, bail
+                    if (inboundSerialBuffer.length < CAN_MSG_SIZE) {
+                        break;
+                    }
+
+                    // if the length is out bounds, assume an incorrect frame was sent, and clear
+                    // all incoming data then bail
+                    int dataLength = inboundSerialBuffer[CAN_MSG_LENGTH_OFFSET];
+                    if (dataLength < 0 || dataLength > CAN_MSG_MAX_DATA_SIZE ) {
+                        Log.w(TAG, String.format("m2 sent an invalid frame with data length %d", dataLength));
+                        inboundSerialBuffer = null;
+                        break;
+                    }
+
+                    // if there's not enough data for a full message, bail
+                    int len = dataLength + CAN_MSG_SIZE;
+                    if (len > inboundSerialBuffer.length) {
+                        break;
+                    }
+
+                    // if the web socket is open, send the message along (will be lost if not
+                    // connected
+                    if (webSocketOpen) {
+                        Log.d(TAG, String.format("ws <- (%d) %s", len, byteArrayToHex(inboundSerialBuffer, len)));
+                        webSocket.send(ByteString.of(inboundSerialBuffer, 0, len));
+                    }
+
+                    // slice off the data we just sent and if there's more, keep looping
+                    int extraData = inboundSerialBuffer.length - len;
+                    if (extraData > 0) {
+                        inboundSerialBuffer = Arrays.copyOfRange(inboundSerialBuffer, len, inboundSerialBuffer.length);
+                    } else {
+                        inboundSerialBuffer = null;
+                        break;
+                    }
                 }
             }
         }
@@ -246,6 +282,7 @@ public class RelayService extends Service {
         public void onOpen(WebSocket webSocket, Response response) {
             Log.i(TAG, "Web socket is open");
             webSocketOpen = true;
+            gattServer.setCharacteristicNotification(serialCharacteristic, true);
         }
 
         @Override
