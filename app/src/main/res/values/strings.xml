@@ -1,3 +1,6 @@
 <resources>
     <string name="app_name">Onyx M2 Relay</string>
+    <string name="title_activity_main">MainActivity</string>
+    <string name="controls_tab_text">Controls</string>
+    <string name="logs_tab_text">Logs</string>
 </resources>

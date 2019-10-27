@@ -28,6 +28,8 @@ import java.util.Arrays;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.Queue;
+import java.util.Timer;
+import java.util.TimerTask;
 import java.util.concurrent.TimeUnit;
 
 import okhttp3.OkHttpClient;
@@ -309,7 +311,12 @@ public class RelayService extends Service {
             Log.i(TAG, "Web socket error: " + t.getMessage());
             webSocket.close(WEBSOCKET_NORMAL_CLOSURE_STATUS, t.getMessage());
             webSocketOpen = false;
-            connectWebService();
+            new Timer().schedule(new TimerTask() {
+                @Override
+                public void run() {
+                    connectWebService();
+                }
+            }, 1000);
         }
     };
 
