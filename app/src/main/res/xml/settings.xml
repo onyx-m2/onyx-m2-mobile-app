@@ -1,0 +1,82 @@
+<?xml version="1.0" encoding="utf-8"?>
+<androidx.preference.PreferenceScreen xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto">
+
+    <PreferenceCategory
+        android:key="server_settings"
+        android:title="Server"
+        android:summary="Configure where M2 sends CAN data"
+        app:iconSpaceReserved="false">
+
+        <EditTextPreference
+            app:key="server_hostname"
+            app:title="Hostname"
+            android:dialogTitle="Enter the hostname of your Onyx M2 server"
+            app:useSimpleSummaryProvider="true"
+            app:iconSpaceReserved="false"/>
+
+        <EditTextPreference
+            app:key="server_pin"
+            app:title="PIN"
+            android:dialogTitle="Enter the access pin code of your Onyx M2 server"
+            app:useSimpleSummaryProvider="true"
+            app:iconSpaceReserved="false"
+            android:inputType="textPassword" />
+
+    </PreferenceCategory>
+
+    <PreferenceCategory
+        android:key="home_wifi_settings"
+        android:title="Home Wifi"
+        app:summary="Configure M2 to use a home wifi network"
+        app:iconSpaceReserved="false">
+
+        <SwitchPreferenceCompat
+            app:key="home_wifi_enabled"
+            app:title="Enabled"
+            app:iconSpaceReserved="false"/>
+
+        <EditTextPreference
+            app:key="home_wifi_ssid"
+            app:title="SSID"
+            android:dialogTitle="Enter the SSID of your home wifi network"
+            app:useSimpleSummaryProvider="true"
+            app:iconSpaceReserved="false"/>
+
+        <EditTextPreference
+            app:key="home_wifi_password"
+            app:title="Password"
+            android:dialogTitle="Enter the password of your home wifi network"
+            app:useSimpleSummaryProvider="true"
+            app:iconSpaceReserved="false"/>
+
+    </PreferenceCategory>
+
+    <PreferenceCategory
+        android:key="mobile_wifi_settings"
+        android:title="Hotspot Wifi"
+        app:summary="Configure M2 to use a mobile hotspot"
+        app:iconSpaceReserved="false">
+
+        <SwitchPreferenceCompat
+            app:key="mobile_wifi_enable"
+            app:title="Enable"
+            app:iconSpaceReserved="false"/>
+
+        <EditTextPreference
+            app:key="mobile_wifi_ssid"
+            app:title="SSID"
+            android:dialogTitle="Enter the SSID of your hotspot wifi network"
+            app:useSimpleSummaryProvider="true"
+            app:iconSpaceReserved="false"/>
+
+        <EditTextPreference
+            app:key="mobile_wifi_password"
+            app:title="Password"
+            android:dialogTitle="Enter the password of your hotspot wifi network"
+            app:useSimpleSummaryProvider="true"
+            app:iconSpaceReserved="false"/>
+
+    </PreferenceCategory>
+
+</androidx.preference.PreferenceScreen>
