@@ -31,6 +31,8 @@ public class MainActivity extends AppCompatActivity {
         public void onServiceConnected(ComponentName className, IBinder binder) {
             Log.d(TAG, "Service connected");
             relayService = ((RelayService.RelayBinder) binder).getService();
+            setLinkConnected(R.id.bleImage, R.id.bleConnectedImage, relayService.isBleConnected());
+            setLinkConnected(R.id.wsImage, R.id.wsConnectedImage, relayService.isWebSocketConnected());
             if (startStopAction != null) {
                 startStopAction.setTitle("Stop Relay");
             }
@@ -50,20 +52,16 @@ public class MainActivity extends AppCompatActivity {
         public boolean handleMessage(Message msg) {
             switch (msg.what) {
                 case RelayService.MSG_BLE_CONNECTED:
-                    MainActivity.this.findViewById(R.id.bleConnectedImage).setVisibility(View.VISIBLE);
-                    MainActivity.this.findViewById(R.id.bleImage).setAlpha(1.0f);
+                    setLinkConnected(R.id.bleImage, R.id.bleConnectedImage, true);
                     break;
                 case RelayService.MSG_BLE_DISCONNECTED:
-                    MainActivity.this.findViewById(R.id.bleConnectedImage).setVisibility(View.INVISIBLE);
-                    MainActivity.this.findViewById(R.id.bleImage).setAlpha(0.5f);
+                    setLinkConnected(R.id.bleImage, R.id.bleConnectedImage, false);
                     break;
                 case RelayService.MSG_WS_CONNECTED:
-                    MainActivity.this.findViewById(R.id.wsConnectedImage).setVisibility(View.VISIBLE);
-                    MainActivity.this.findViewById(R.id.wsImage).setAlpha(1.0f);
+                    setLinkConnected(R.id.wsImage, R.id.wsConnectedImage, true);
                     break;
                 case RelayService.MSG_WS_DISCONNECTED:
-                    MainActivity.this.findViewById(R.id.wsConnectedImage).setVisibility(View.INVISIBLE);
-                    MainActivity.this.findViewById(R.id.wsImage).setAlpha(0.5f);
+                    setLinkConnected(R.id.wsImage, R.id.wsConnectedImage, false);
                     break;
             }
             return true;
@@ -136,5 +134,12 @@ public class MainActivity extends AppCompatActivity {
         Intent intent = new Intent(this, RelayService.class);
         intent.putExtra("MESSENGER", new Messenger(relayHandler));
         bindService(intent, relayConnection, Context.BIND_AUTO_CREATE);
+    }
+
+    private void setLinkConnected(int imageId, int linkId, boolean connected) {
+        int visibility = connected ? View.VISIBLE : View.INVISIBLE;
+        float alpha = connected ? 1.0f : 0.5f;
+        findViewById(linkId).setVisibility(visibility);
+        findViewById(imageId).setAlpha(alpha);
     }
 }

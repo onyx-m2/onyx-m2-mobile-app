@@ -18,10 +18,14 @@ import android.bluetooth.le.ScanCallback;
 import android.bluetooth.le.ScanFilter;
 import android.bluetooth.le.ScanResult;
 import android.bluetooth.le.ScanSettings;
+import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
+import android.content.IntentFilter;
 import android.content.SharedPreferences;
+import android.net.wifi.WifiManager;
 import android.os.Binder;
+import android.os.Bundle;
 import android.os.IBinder;
 import android.os.Message;
 import android.os.Messenger;
@@ -32,7 +36,7 @@ import android.widget.Toast;
 import androidx.core.app.NotificationCompat;
 import androidx.preference.PreferenceManager;
 
-import java.util.Arrays;
+import java.util.Collections;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.Queue;
@@ -73,8 +77,10 @@ public class RelayService extends Service {
         M2_MESSAGE_CHARACTERISTIC_UUID = UUID.fromString("7d363f56-9154-4168-8ee8-034a216edfb4");
     }
 
-    private static final int WEBSOCKET_NORMAL_CLOSURE_STATUS = 1000;
-    private static final int WEBSOCKET_ERROR_CLOSURE_STATUS = 2000;
+    private static final int WEBSOCKET_NORMAL_CLOSURE_STATUS;
+    static {
+        WEBSOCKET_NORMAL_CLOSURE_STATUS = 1000;
+    }
 
     private BluetoothLeScanner bleScanner;
     private BluetoothGatt gattServer;
@@ -87,9 +93,13 @@ public class RelayService extends Service {
     private Queue<byte[]> commandQueue;
     private Queue<String> configQueue;
 
+    private static final int WS_STATE_OPEN = 1;
+    private static final int WS_STATE_CLOSED = 2;
+
     private OkHttpClient webClient;
     private WebSocket webSocket;
-    private boolean webSocketOpen = false;
+    private int webSocketState = WS_STATE_CLOSED;
+    private int webSocketDesiredState = WS_STATE_CLOSED;
     private String webSocketHostname;
     private String webSocketPin;
 
@@ -106,11 +116,40 @@ public class RelayService extends Service {
     public static final int MSG_WS_CONNECTED = 3;
     public static final int MSG_WS_DISCONNECTED = 4;
 
+    // We need to listen for wifi coming up because by default, the os will happily continue to
+    // service the web socket using the LTE interface even wifi becomes available. So, we'll
+    // cycle the ws when we detect wifi coming up.
+    private BroadcastReceiver wifiBroadcastReceiver = new BroadcastReceiver() {
+        @Override
+        public void onReceive(Context context, Intent intent) {
+            Log.d(TAG, "Wifi broadcast receive");
+            String action = intent.getAction();
+            if (action != null && action.equals(WifiManager.WIFI_STATE_CHANGED_ACTION)) {
+                Log.d(TAG, "Wifi state changed");
+                int wifiState = intent.getIntExtra(WifiManager.EXTRA_WIFI_STATE, WifiManager.WIFI_STATE_UNKNOWN);
+                if (wifiState == WifiManager.WIFI_STATE_ENABLED) {
+                    Log.d(TAG, "Wifi state enabled");
+                    if (webSocketState == WS_STATE_OPEN) {
+                        Log.i(TAG, "Scheduling cycling web socket connection in 5s");
+                        new Timer().schedule(new TimerTask() {
+                            @Override
+                            public void run() {
+                                webSocket.close(WEBSOCKET_NORMAL_CLOSURE_STATUS, "Switching to wifi");
+                            }
+                        }, 5000);
+                    }
+                }
+            }
+        }
+    };
+
     @Override
     public void onCreate() {
         Log.d(TAG, "Create, thread id: " + Thread.currentThread().getId());
-        final BluetoothManager manager = (BluetoothManager) getSystemService(Context.BLUETOOTH_SERVICE);
-        bleScanner = manager.getAdapter().getBluetoothLeScanner();
+        final BluetoothManager btManager = (BluetoothManager) getSystemService(Context.BLUETOOTH_SERVICE);
+        if (btManager != null) {
+            bleScanner = btManager.getAdapter().getBluetoothLeScanner();
+        }
 
         commandQueue = new LinkedList<>();
         configQueue = new LinkedList<>();
@@ -123,7 +162,14 @@ public class RelayService extends Service {
                 "Onyx M2 Channel",
                 NotificationManager.IMPORTANCE_LOW);
         channel.setShowBadge(false);
-        ((NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE)).createNotificationChannel(channel);
+        NotificationManager notifManager = ((NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE));
+        if (notifManager != null) {
+            notifManager.createNotificationChannel(channel);
+        }
+
+        IntentFilter filter = new IntentFilter();
+        filter.addAction(WifiManager.WIFI_STATE_CHANGED_ACTION);
+        registerReceiver(wifiBroadcastReceiver, filter);
 
         Toast.makeText(this, "Onyx Relay Started", Toast.LENGTH_LONG).show();
     }
@@ -131,14 +177,19 @@ public class RelayService extends Service {
     public void onDestroy() {
         Log.d(TAG, "Destroy, thread id: " + Thread.currentThread().getId());
         Toast.makeText(this, "Onyx Relay Stopped", Toast.LENGTH_LONG).show();
+
+        webSocketDesiredState = WS_STATE_CLOSED;
         if (webSocket != null) {
-            webSocket.close(WEBSOCKET_NORMAL_CLOSURE_STATUS, "Server disconnected");
-            setWebSocketState(false, false);
+            webSocket.close(WEBSOCKET_NORMAL_CLOSURE_STATUS, "Service destroyed");
+            setWebSocketState(WS_STATE_CLOSED, false);
         }
+
         if (gattServer != null) {
             gattServer.close();
-            setBleState(false, false);
+            setBleConnected(false, false);
         }
+
+        unregisterReceiver(wifiBroadcastReceiver);
     }
 
     @Override
@@ -158,14 +209,20 @@ public class RelayService extends Service {
     @Override
     public IBinder onBind(Intent intent) {
         Log.d(TAG, "Bind");
-        messenger = (Messenger) intent.getExtras().get("MESSENGER");
+        Bundle extras = intent.getExtras();
+        if (extras != null) {
+            messenger = (Messenger) extras.get("MESSENGER");
+        }
         return binder;
     }
 
     @Override
     public void onRebind(Intent intent) {
         Log.d(TAG, "Rebind");
-        messenger = (Messenger) intent.getExtras().get("MESSENGER");
+        Bundle extras = intent.getExtras();
+        if (extras != null) {
+            messenger = (Messenger) extras.get("MESSENGER");
+        }
         super.onRebind(intent);
     }
 
@@ -176,7 +233,7 @@ public class RelayService extends Service {
         return true;
     }
 
-    class M2ScanCallback extends ScanCallback {
+    ScanCallback scanCallback = new ScanCallback() {
 
         @Override
         public void onBatchScanResults(List<ScanResult> results) {
@@ -194,14 +251,14 @@ public class RelayService extends Service {
             BluetoothDevice device = result.getDevice();
             Log.d(TAG, String.format("From device: %s, address: %s", device.getName(), device.getAddress()));
             bleScanner.stopScan(this);
-            connectDevice(device);
+            gattServer = device.connectGatt(RelayService.this, true, new M2GattCallback());
         }
-    }
+    };
 
     private void scan() {
         Log.d(TAG, "Scanning for M2");
 
-        List<ScanFilter> deviceFilters = Arrays.asList(new ScanFilter.Builder()
+        List<ScanFilter> deviceFilters = Collections.singletonList(new ScanFilter.Builder()
                 .setDeviceName("Onyx M2")
                 .build());
 
@@ -209,7 +266,7 @@ public class RelayService extends Service {
                 .setScanMode(ScanSettings.SCAN_MODE_BALANCED)
                 .build();
 
-        bleScanner.startScan(deviceFilters, settings, new M2ScanCallback());
+        bleScanner.startScan(deviceFilters, settings, scanCallback);
     }
 
     class M2GattCallback extends BluetoothGattCallback {
@@ -223,11 +280,12 @@ public class RelayService extends Service {
                 gattServer.discoverServices();
             } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
                 Log.i(TAG, "Disconnected from M2 GATT server");
+                webSocketDesiredState = WS_STATE_CLOSED;
                 if (webSocket != null) {
                     webSocket.close(WEBSOCKET_NORMAL_CLOSURE_STATUS, "M2 disconnected");
                 }
-                setWebSocketState(false, false);
-                setBleState(false, true);
+                setWebSocketState(WS_STATE_CLOSED, false);
+                setBleConnected(false, true);
             }
         }
 
@@ -259,9 +317,10 @@ public class RelayService extends Service {
                         commandCharacteristic = service.getCharacteristic(M2_COMMAND_CHARACTERISTIC_UUID);
                         messageCharacteristic = service.getCharacteristic(M2_MESSAGE_CHARACTERISTIC_UUID);
 
-                        setBleState(true, true);
+                        setBleConnected(true, true);
                         enableCharacteristicNotification(messageCharacteristic);
-                        connectWebService();
+                        webSocketDesiredState = WS_STATE_OPEN;
+                        connectWebSocket();
                     }
                 }
             }
@@ -284,8 +343,8 @@ public class RelayService extends Service {
                 Log.w(TAG, "Ignoring empty characteristic value");
                 return;
             }
-            if (!webSocketOpen) {
-                Log.w(TAG, "Ignoring incoming message because websocket is down");
+            if (webSocketState == WS_STATE_CLOSED) {
+                Log.w(TAG, "Ignoring incoming message because web socket is down");
                 return;
             }
             ByteString bytes = ByteString.of(data);
@@ -309,24 +368,20 @@ public class RelayService extends Service {
         }
     }
 
-    private void connectDevice(BluetoothDevice device) {
-        gattServer = device.connectGatt(this, true, new M2GattCallback());
-    }
-
     WebSocketListener webSocketListener = new WebSocketListener() {
         @Override
-        public void onOpen(WebSocket webSocket, Response response) {
+        public void onOpen(WebSocket ws, Response response) {
             Log.i(TAG, "Web socket is open");
-            setWebSocketState(true, true);
+            setWebSocketState(WS_STATE_OPEN, true);
         }
 
         @Override
-        public void onMessage(WebSocket webSocket, String text) {
+        public void onMessage(WebSocket ws, String text) {
             Log.i(TAG, "m2 <- " + text + " (unsupported)");
         }
 
         @Override
-        public void onMessage(WebSocket webSocket, ByteString bytes) {
+        public void onMessage(WebSocket ws, ByteString bytes) {
             Log.i(TAG, String.format("m2 <- (%d) %s", bytes.size(), bytes.hex()));
             byte[] command = bytes.toByteArray();
             commandCharacteristic.setValue(command);
@@ -336,30 +391,50 @@ public class RelayService extends Service {
             }
         }
 
+        // Remote is closing the connection
         @Override
-        public void onClosing(WebSocket webSocket, int code, String reason) {
+        public void onClosing(WebSocket ws, int code, String reason) {
             Log.i(TAG, "Web socket is closing: " + code + " / " + reason);
-            webSocket.close(WEBSOCKET_NORMAL_CLOSURE_STATUS, "Server disconnected");
-            setWebSocketState(false, true);
+            if (ws == webSocket) {
+                webSocket.close(WEBSOCKET_NORMAL_CLOSURE_STATUS, "Server disconnected");
+                setWebSocketState(WS_STATE_CLOSED, true);
+            }
+        }
+
+        // Error or timeout on the connection
+        @Override
+        public void onFailure(WebSocket ws, Throwable t, Response response) {
+            Log.i(TAG, "Web socket error: " + t.getMessage());
+            if (ws == webSocket) {
+                webSocket.close(WEBSOCKET_NORMAL_CLOSURE_STATUS, t.getMessage());
+                webSocket = null;
+                setWebSocketState(WS_STATE_CLOSED, true);
+                new Timer().schedule(new TimerTask() {
+                    @Override
+                    public void run() {
+                        connectWebSocket();
+                    }
+                }, 1000);
+            }
         }
 
         @Override
-        public void onFailure(WebSocket webSocket, Throwable t, Response response) {
-            Log.i(TAG, "Web socket error: " + t.getMessage());
-            webSocket.close(WEBSOCKET_NORMAL_CLOSURE_STATUS, t.getMessage());
-            setWebSocketState(false, true);
-            new Timer().schedule(new TimerTask() {
-                @Override
-                public void run() {
-                    connectWebService();
+        public void onClosed(WebSocket ws, int code, String reason) {
+            Log.d(TAG, "Web socket closed: " + code + " / " + reason);
+            if (ws == webSocket) {
+                webSocket = null;
+                if (webSocketDesiredState == WS_STATE_OPEN) {
+                    Log.i(TAG, "Reconnecting web socket on close");
+                    connectWebSocket();
                 }
-            }, 1000);
+            }
         }
     };
 
-    private void connectWebService() {
-        if (!webSocketOpen) {
-            Log.d(TAG, String.format("Connect web service, hostname: %s, pin: %s", webSocketHostname, webSocketPin));
+    private void connectWebSocket() {
+        Log.d(TAG, "Connect web socket");
+        if (webSocketState == WS_STATE_CLOSED && webSocketDesiredState == WS_STATE_OPEN) {
+            Log.d(TAG, String.format("Web socket config, hostname: %s, pin: %s", webSocketHostname, webSocketPin));
             if (!webSocketHostname.isEmpty() && !webSocketPin.isEmpty()) {
                 String url = String.format("wss://%s/relay?pin=%s", webSocketHostname, webSocketPin);
                 Request request = new Request.Builder().url(url).build();
@@ -368,10 +443,10 @@ public class RelayService extends Service {
         }
     }
 
-    private void setWebSocketState(boolean state, boolean notify) {
-        webSocketOpen = state;
+    private void setWebSocketState(int state, boolean notify) {
+        webSocketState = state;
         if (notify && gattServer != null) {
-            relayCharacteristic.setValue(state ? 1 : 0, FORMAT_UINT8, 0);
+            relayCharacteristic.setValue(state == WS_STATE_OPEN ? 1 : 0, FORMAT_UINT8, 0);
             gattServer.writeCharacteristic(relayCharacteristic);
         }
         if (notify) {
@@ -379,21 +454,21 @@ public class RelayService extends Service {
         }
         if (messenger != null) {
             try {
-                messenger.send(Message.obtain(null, state ? MSG_WS_CONNECTED : MSG_WS_DISCONNECTED));
+                messenger.send(Message.obtain(null, state == WS_STATE_OPEN ? MSG_WS_CONNECTED : MSG_WS_DISCONNECTED));
             } catch (RemoteException e) {
                 e.printStackTrace();
             }
         }
     }
 
-    private void setBleState(boolean state, boolean notify) {
-        bleConnected = state;
+    private void setBleConnected(boolean connected, boolean notify) {
+        bleConnected = connected;
         if (notify) {
             updateServiceNotification();
         }
         if (messenger != null) {
             try {
-                messenger.send(Message.obtain(null, state ? MSG_BLE_CONNECTED : MSG_BLE_DISCONNECTED));
+                messenger.send(Message.obtain(null, connected ? MSG_BLE_CONNECTED : MSG_BLE_DISCONNECTED));
             } catch (RemoteException e) {
                 e.printStackTrace();
             }
@@ -415,11 +490,11 @@ public class RelayService extends Service {
         }
     }
 
-    public boolean syncConfig() {
+    public void syncConfig() {
         Log.d(TAG, "Sync config, thread id: " + Thread.currentThread().getId());
         if (gattServer == null) {
             Toast.makeText(this, "Onyx M2 Not Connected", Toast.LENGTH_LONG).show();
-            return false;
+            return;
         }
         SharedPreferences settings = PreferenceManager.getDefaultSharedPreferences(this);
         webSocketHostname = settings.getString("server_hostname", "");
@@ -436,21 +511,28 @@ public class RelayService extends Service {
         setConfig("MP=" + settings.getString("mobile_wifi_password", ""));
         setConfig("RESET");
         Toast.makeText(this, "Updating Onyx M2 Config", Toast.LENGTH_LONG).show();
-        return true;
+    }
+
+    public boolean isBleConnected() {
+        return bleConnected;
+    }
+
+    public boolean isWebSocketConnected() {
+        return webSocketState == WS_STATE_OPEN;
     }
 
     Notification createServiceNotification() {
         String title;
         String text;
         if (!bleConnected) {
-            title = "Scanning";
-            text = "M2 is offline or out of range";
-        } else if (!webSocketOpen) {
-            title = "Connecting";
-            text = "M2 is online, connecting to cloud server";
+            title = "Scanning for Onyx M2";
+            text = "Device is offline or out of range";
+        } else if (webSocketState == WS_STATE_CLOSED) {
+            title = "Connecting to Onyx M2 server";
+            text = "Device is online, connecting to cloud server";
         } else {
-            title = "Online";
-            text = "M2 cloud link is active";
+            title = "Onyx M2 Online";
+            text = "Cloud link is active";
         }
         return new NotificationCompat.Builder(this, CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_broken_image_red_24dp)
@@ -462,6 +544,8 @@ public class RelayService extends Service {
 
     void updateServiceNotification() {
         NotificationManager manager = ((NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE));
-        manager.notify(SERVICE_NOTIFICATION_ID, createServiceNotification());
+        if (manager != null) {
+            manager.notify(SERVICE_NOTIFICATION_ID, createServiceNotification());
+        }
     }
 }
