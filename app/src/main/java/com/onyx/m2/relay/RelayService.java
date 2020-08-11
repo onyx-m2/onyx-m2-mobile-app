@@ -525,17 +525,18 @@ public class RelayService extends Service {
         String title;
         String text;
         if (!bleConnected) {
-            title = "Scanning for Onyx M2";
+            title = "Idle";
             text = "Device is offline or out of range";
         } else if (webSocketState == WS_STATE_CLOSED) {
-            title = "Connecting to Onyx M2 server";
-            text = "Device is online, connecting to cloud server";
+            title = "Connected";
+            text = "Connected to Bluetooth, but not connected to cloud server";
         } else {
-            title = "Onyx M2 Online";
-            text = "Cloud link is active";
+            title = "Online";
+            text = "Device cloud link is active";
         }
         return new NotificationCompat.Builder(this, CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_broken_image_red_24dp)
+            .setColor(0xFFC90000)
             .setContentTitle(title)
             .setContentText(text)
             .setContentIntent(PendingIntent.getActivity(this, 0, new Intent(this, MainActivity.class), 0))
