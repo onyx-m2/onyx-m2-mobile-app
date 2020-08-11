@@ -26,6 +26,7 @@ import android.content.SharedPreferences;
 import android.net.wifi.WifiManager;
 import android.os.Binder;
 import android.os.Bundle;
+import android.os.Handler;
 import android.os.IBinder;
 import android.os.Message;
 import android.os.Messenger;
@@ -102,6 +103,9 @@ public class RelayService extends Service {
     private int webSocketDesiredState = WS_STATE_CLOSED;
     private String webSocketHostname;
     private String webSocketPin;
+    private int webSocketMsgRate;
+    private int webSocketMsgCount;
+    private Handler webSocketMsgCountHandler;
 
     private Messenger messenger;
     private IBinder binder = new RelayBinder();
@@ -170,6 +174,19 @@ public class RelayService extends Service {
         IntentFilter filter = new IntentFilter();
         filter.addAction(WifiManager.WIFI_STATE_CHANGED_ACTION);
         registerReceiver(wifiBroadcastReceiver, filter);
+
+        webSocketMsgCountHandler = new Handler();
+        webSocketMsgCountHandler.postDelayed(new Runnable(){
+            public void run(){
+                int prevWebSocketMsgRate = webSocketMsgRate;
+                webSocketMsgRate = webSocketMsgCount;
+                webSocketMsgCount = 0;
+                if (webSocketMsgRate != prevWebSocketMsgRate) {
+                    updateServiceNotification();
+                }
+                webSocketMsgCountHandler.postDelayed(this, 1000);
+            }
+        }, 1000);
 
         Toast.makeText(this, "Onyx Relay Started", Toast.LENGTH_LONG).show();
     }
@@ -350,6 +367,7 @@ public class RelayService extends Service {
             ByteString bytes = ByteString.of(data);
             Log.i(TAG, String.format("m2 <- (%d) %s", bytes.size(), bytes.hex()));
             webSocket.send(bytes);
+            webSocketMsgCount++;
         }
 
         @Override
@@ -524,19 +542,27 @@ public class RelayService extends Service {
     Notification createServiceNotification() {
         String title;
         String text;
-        if (!bleConnected) {
+        int colour;
+        if (webSocketMsgRate > 0) {
+            title = "Active";
+            text = "Relaying " + webSocketMsgRate + " msgs/sec";
+            colour = 0xFFC90000;
+        } else if (!bleConnected) {
             title = "Idle";
             text = "Device is offline or out of range";
+            colour = 0xFFFFFFFF;
         } else if (webSocketState == WS_STATE_CLOSED) {
             title = "Connected";
-            text = "Connected to Bluetooth, but not connected to cloud server";
+            text = "Bluetooth link is available";
+            colour = 0xFF0000FF;
         } else {
             title = "Online";
-            text = "Device cloud link is active";
+            text = "Cloud link is available";
+            colour = 0xFF00FF00;
         }
         return new NotificationCompat.Builder(this, CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_broken_image_red_24dp)
-            .setColor(0xFFC90000)
+            .setColor(colour)
             .setContentTitle(title)
             .setContentText(text)
             .setContentIntent(PendingIntent.getActivity(this, 0, new Intent(this, MainActivity.class), 0))
