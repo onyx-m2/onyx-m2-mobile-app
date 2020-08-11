@@ -37,6 +37,8 @@ import android.widget.Toast;
 import androidx.core.app.NotificationCompat;
 import androidx.preference.PreferenceManager;
 
+import org.jetbrains.annotations.NotNull;
+
 import java.util.Collections;
 import java.util.LinkedList;
 import java.util.List;
@@ -388,18 +390,18 @@ public class RelayService extends Service {
 
     WebSocketListener webSocketListener = new WebSocketListener() {
         @Override
-        public void onOpen(WebSocket ws, Response response) {
+        public void onOpen(@NotNull WebSocket ws, @NotNull Response response) {
             Log.i(TAG, "Web socket is open");
             setWebSocketState(WS_STATE_OPEN, true);
         }
 
         @Override
-        public void onMessage(WebSocket ws, String text) {
+        public void onMessage(@NotNull WebSocket ws, @NotNull String text) {
             Log.i(TAG, "m2 <- " + text + " (unsupported)");
         }
 
         @Override
-        public void onMessage(WebSocket ws, ByteString bytes) {
+        public void onMessage(@NotNull WebSocket ws, ByteString bytes) {
             Log.i(TAG, String.format("m2 <- (%d) %s", bytes.size(), bytes.hex()));
             byte[] command = bytes.toByteArray();
             commandCharacteristic.setValue(command);
@@ -411,7 +413,7 @@ public class RelayService extends Service {
 
         // Remote is closing the connection
         @Override
-        public void onClosing(WebSocket ws, int code, String reason) {
+        public void onClosing(@NotNull WebSocket ws, int code, @NotNull String reason) {
             Log.i(TAG, "Web socket is closing: " + code + " / " + reason);
             if (ws == webSocket) {
                 webSocket.close(WEBSOCKET_NORMAL_CLOSURE_STATUS, "Server disconnected");
@@ -421,7 +423,7 @@ public class RelayService extends Service {
 
         // Error or timeout on the connection
         @Override
-        public void onFailure(WebSocket ws, Throwable t, Response response) {
+        public void onFailure(@NotNull WebSocket ws, Throwable t, Response response) {
             Log.i(TAG, "Web socket error: " + t.getMessage());
             if (ws == webSocket) {
                 webSocket.close(WEBSOCKET_NORMAL_CLOSURE_STATUS, t.getMessage());
@@ -437,7 +439,7 @@ public class RelayService extends Service {
         }
 
         @Override
-        public void onClosed(WebSocket ws, int code, String reason) {
+        public void onClosed(@NotNull WebSocket ws, int code, @NotNull String reason) {
             Log.d(TAG, "Web socket closed: " + code + " / " + reason);
             if (ws == webSocket) {
                 webSocket = null;
