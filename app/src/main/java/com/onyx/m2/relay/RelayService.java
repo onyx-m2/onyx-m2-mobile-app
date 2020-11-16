@@ -24,17 +24,15 @@ import android.content.Intent;
 import android.content.IntentFilter;
 import android.content.SharedPreferences;
 import android.net.wifi.WifiManager;
+import android.os.BatteryManager;
 import android.os.Binder;
-import android.os.Bundle;
 import android.os.Handler;
 import android.os.IBinder;
-import android.os.Message;
-import android.os.Messenger;
-import android.os.RemoteException;
 import android.util.Log;
 import android.widget.Toast;
 
 import androidx.core.app.NotificationCompat;
+import androidx.lifecycle.MutableLiveData;
 import androidx.preference.PreferenceManager;
 
 import org.jetbrains.annotations.NotNull;
@@ -60,8 +58,10 @@ import static android.bluetooth.BluetoothGattCharacteristic.FORMAT_UINT8;
 
 public class RelayService extends Service {
     private static final String TAG = "RelayService";
-    private static final String CHANNEL_ID = "onyx_m2_service_channel";
+    private static final String SERVICE_CHANNEL_ID = "onyx_m2_service_channel";
     private static final int SERVICE_NOTIFICATION_ID = 1;
+    private static final String INSTRUMENT_CLUSTER_CHANNEL_ID = "onyx_m2_instrument_cluster_channel";
+    public static final int INSTRUMENT_CLUSTER_NOTIFICATION_ID = 2;
 
     public static final UUID CHARACTERISTIC_UPDATE_NOTIFICATION_DESCRIPTOR_UUID;
 
@@ -91,7 +91,6 @@ public class RelayService extends Service {
     private BluetoothGattCharacteristic relayCharacteristic;
     private BluetoothGattCharacteristic commandCharacteristic;
     private BluetoothGattCharacteristic messageCharacteristic;
-    private boolean bleConnected = false;
 
     private Queue<byte[]> commandQueue;
     private Queue<String> configQueue;
@@ -109,10 +108,9 @@ public class RelayService extends Service {
     private int webSocketMsgCount;
     private Handler webSocketMsgCountHandler;
 
-    private Messenger messenger;
     private IBinder binder = new RelayBinder();
     public class RelayBinder extends Binder {
-        RelayService getService() {
+        public RelayService getService() {
             return RelayService.this;
         }
     };
@@ -121,6 +119,34 @@ public class RelayService extends Service {
     public static final int MSG_BLE_DISCONNECTED = 2;
     public static final int MSG_WS_CONNECTED = 3;
     public static final int MSG_WS_DISCONNECTED = 4;
+    public static final int MSG_DATA = 5;
+
+    private MutableLiveData<Boolean> bleConnected;
+    public MutableLiveData<Boolean> getBleConnected() {
+        return bleConnected;
+    }
+
+    private MutableLiveData<Boolean> webSocketConnected;
+    public MutableLiveData<Boolean> getWebSocketConnected() {
+        return webSocketConnected;
+    }
+
+    private MutableLiveData<Boolean> inHolder;
+    public MutableLiveData<Boolean> getInHolder() {
+        return inHolder;
+    }
+
+/*
+    private MutableLiveData<byte[]> m2Message;
+    public MutableLiveData<byte[]> getM2Message() {
+        return m2Message;
+    }
+
+    private MutableLiveData<byte[]> m2Command;
+    public MutableLiveData<byte[]> getM2Command() {
+        return m2Command;
+    }
+*/
 
     // We need to listen for wifi coming up because by default, the os will happily continue to
     // service the web socket using the LTE interface even wifi becomes available. So, we'll
@@ -149,6 +175,47 @@ public class RelayService extends Service {
         }
     };
 
+    // Listen for battery notifications to detect when the phone starts wireless charging.
+    // This, combined with checking that the phone is in landscape mode, automates starting the
+    // instrument cluster when the phone is placed into the car mount holder (in all my other
+    // wireless chargers, the phone sits upright).
+    private boolean showInstrumentClusterOnNextBatteryChange = false;
+    private BroadcastReceiver batteryBroadcastReceiver = new BroadcastReceiver() {
+        @Override
+        public void onReceive(Context context, Intent intent) {
+            Log.d(TAG, "Battery broadcast receive");
+            String action = intent.getAction();
+            if (action != null) {
+                if (action.equals(Intent.ACTION_POWER_CONNECTED)) {
+                    Log.d(TAG, "Power connected");
+                    // this is necessary because BATTERY_PLUGGED_WIRELESS extra is only sent
+                    // the ACTION_BATTERY_CHANGED
+                    showInstrumentClusterOnNextBatteryChange = true;
+                }
+                else if (action.equals(Intent.ACTION_POWER_DISCONNECTED)) {
+                    Log.d(TAG, "Power disconnected");
+                    inHolder.postValue(false);
+                }
+                else if (action.equals(Intent.ACTION_BATTERY_CHANGED) && showInstrumentClusterOnNextBatteryChange) {
+                    showInstrumentClusterOnNextBatteryChange = false;
+                    int pluggedState = intent.getIntExtra(BatteryManager.EXTRA_PLUGGED, 0);
+                    if (pluggedState == BatteryManager.BATTERY_PLUGGED_AC /*WIRELESS*/) {
+                        Log.d(TAG, "Plugged into wireless");
+                        inHolder.postValue(true);
+                        /*Display display = ((WindowManager)getSystemService(WINDOW_SERVICE)).getDefaultDisplay();
+                        int rotation = display.getRotation();
+                        if (rotation == Surface.ROTATION_90 || rotation == Surface.ROTATION_270) {
+                            showInstrumentCluster();
+                        }*/
+                    }
+                }
+            }
+        }
+    };
+
+    // NOTE: If the above turns out to be too aggressive and leads to false positives, we could
+    // also try using the motion sensors to detect a vertical slide prior to charging starting.
+
     @Override
     public void onCreate() {
         Log.d(TAG, "Create, thread id: " + Thread.currentThread().getId());
@@ -157,6 +224,34 @@ public class RelayService extends Service {
             bleScanner = btManager.getAdapter().getBluetoothLeScanner();
         }
 
+        bleConnected = new MutableLiveData<>(false);
+        webSocketConnected = new MutableLiveData<>(false);
+        inHolder = new MutableLiveData<>(false);
+        inHolder.observeForever(value -> {
+            Log.d(TAG, "InHolder onChanged");
+            if (value) {
+                showInstrumentCluster();
+            } else {
+                hideInstrumentCluster();
+            }
+        });
+/*
+        m2Message = new MutableLiveData<>();
+        m2Command = new MutableLiveData<>();
+        m2Command.observeForever(command -> {
+            Log.d(TAG, "M2Command onChanged");
+            if (gattServer != null && commandCharacteristic != null) {
+                commandCharacteristic.setValue(command);
+                if (!gattServer.writeCharacteristic(commandCharacteristic)) {
+                    Log.d(TAG, "Queueing command because writing failed");
+                    commandQueue.add(command);
+                }
+            }
+            else {
+                Log.d(TAG, "Ignoring command because m2 is not connected");
+            }
+        });
+*/
         commandQueue = new LinkedList<>();
         configQueue = new LinkedList<>();
 
@@ -164,18 +259,11 @@ public class RelayService extends Service {
             .pingInterval(2, TimeUnit.SECONDS)
             .build();
 
-        NotificationChannel channel = new NotificationChannel(CHANNEL_ID,
-                "Onyx M2 Channel",
-                NotificationManager.IMPORTANCE_LOW);
-        channel.setShowBadge(false);
-        NotificationManager notifManager = ((NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE));
-        if (notifManager != null) {
-            notifManager.createNotificationChannel(channel);
-        }
+        createNotificationChannels();
 
-        IntentFilter filter = new IntentFilter();
-        filter.addAction(WifiManager.WIFI_STATE_CHANGED_ACTION);
-        registerReceiver(wifiBroadcastReceiver, filter);
+        IntentFilter wifiIntentFilter = new IntentFilter();
+        wifiIntentFilter.addAction(WifiManager.WIFI_STATE_CHANGED_ACTION);
+        registerReceiver(wifiBroadcastReceiver, wifiIntentFilter);
 
         webSocketMsgCountHandler = new Handler();
         webSocketMsgCountHandler.postDelayed(new Runnable(){
@@ -189,6 +277,12 @@ public class RelayService extends Service {
                 webSocketMsgCountHandler.postDelayed(this, 1000);
             }
         }, 1000);
+
+        IntentFilter batteryIntentFilter = new IntentFilter();
+        batteryIntentFilter.addAction(Intent.ACTION_POWER_CONNECTED);
+        batteryIntentFilter.addAction(Intent.ACTION_POWER_DISCONNECTED);
+        batteryIntentFilter.addAction(Intent.ACTION_BATTERY_CHANGED);
+        registerReceiver(batteryBroadcastReceiver, batteryIntentFilter);
 
         Toast.makeText(this, "Onyx Relay Started", Toast.LENGTH_LONG).show();
     }
@@ -209,6 +303,7 @@ public class RelayService extends Service {
         }
 
         unregisterReceiver(wifiBroadcastReceiver);
+        unregisterReceiver(batteryBroadcastReceiver);
     }
 
     @Override
@@ -228,27 +323,18 @@ public class RelayService extends Service {
     @Override
     public IBinder onBind(Intent intent) {
         Log.d(TAG, "Bind");
-        Bundle extras = intent.getExtras();
-        if (extras != null) {
-            messenger = (Messenger) extras.get("MESSENGER");
-        }
         return binder;
     }
 
     @Override
     public void onRebind(Intent intent) {
         Log.d(TAG, "Rebind");
-        Bundle extras = intent.getExtras();
-        if (extras != null) {
-            messenger = (Messenger) extras.get("MESSENGER");
-        }
         super.onRebind(intent);
     }
 
     @Override
     public boolean onUnbind(Intent intent) {
         Log.d(TAG, "Unbind");
-        messenger = null;
         return true;
     }
 
@@ -362,8 +448,9 @@ public class RelayService extends Service {
                 Log.w(TAG, "Ignoring empty characteristic value");
                 return;
             }
+            //m2Message.postValue(data);
             if (webSocketState == WS_STATE_CLOSED) {
-                Log.w(TAG, "Ignoring incoming message because web socket is down");
+                Log.w(TAG, "Incoming message not sent to web socket that is down");
                 return;
             }
             ByteString bytes = ByteString.of(data);
@@ -406,7 +493,7 @@ public class RelayService extends Service {
             byte[] command = bytes.toByteArray();
             commandCharacteristic.setValue(command);
             if (!gattServer.writeCharacteristic(commandCharacteristic)) {
-                Log.d(TAG, "Queueing command");
+                Log.d(TAG, "Queueing command because writing failed");
                 commandQueue.add(command);
             }
         }
@@ -465,6 +552,7 @@ public class RelayService extends Service {
 
     private void setWebSocketState(int state, boolean notify) {
         webSocketState = state;
+        webSocketConnected.postValue(state == WS_STATE_OPEN);
         if (notify && gattServer != null) {
             relayCharacteristic.setValue(state == WS_STATE_OPEN ? 1 : 0, FORMAT_UINT8, 0);
             gattServer.writeCharacteristic(relayCharacteristic);
@@ -472,26 +560,12 @@ public class RelayService extends Service {
         if (notify) {
             updateServiceNotification();
         }
-        if (messenger != null) {
-            try {
-                messenger.send(Message.obtain(null, state == WS_STATE_OPEN ? MSG_WS_CONNECTED : MSG_WS_DISCONNECTED));
-            } catch (RemoteException e) {
-                e.printStackTrace();
-            }
-        }
     }
 
     private void setBleConnected(boolean connected, boolean notify) {
-        bleConnected = connected;
+        bleConnected.postValue(connected);
         if (notify) {
             updateServiceNotification();
-        }
-        if (messenger != null) {
-            try {
-                messenger.send(Message.obtain(null, connected ? MSG_BLE_CONNECTED : MSG_BLE_DISCONNECTED));
-            } catch (RemoteException e) {
-                e.printStackTrace();
-            }
         }
     }
 
@@ -533,12 +607,23 @@ public class RelayService extends Service {
         Toast.makeText(this, "Updating Onyx M2 Config", Toast.LENGTH_LONG).show();
     }
 
-    public boolean isBleConnected() {
-        return bleConnected;
-    }
+    void createNotificationChannels() {
+        NotificationManager manager = ((NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE));
+        if (manager == null) {
+            Log.e(TAG, "Notification manager not available in createNotificationChannels()");
+            return;
+        }
 
-    public boolean isWebSocketConnected() {
-        return webSocketState == WS_STATE_OPEN;
+        NotificationChannel relayChannel = new NotificationChannel(SERVICE_CHANNEL_ID,
+                "Relay",
+                NotificationManager.IMPORTANCE_LOW);
+        relayChannel.setShowBadge(false);
+        manager.createNotificationChannel(relayChannel);
+
+        NotificationChannel instrumentClusterChannel = new NotificationChannel(INSTRUMENT_CLUSTER_CHANNEL_ID,
+                "Instrument Cluster",
+                NotificationManager.IMPORTANCE_HIGH);
+        manager.createNotificationChannel(instrumentClusterChannel);
     }
 
     Notification createServiceNotification() {
@@ -549,21 +634,21 @@ public class RelayService extends Service {
             title = "Active";
             text = "Relaying " + webSocketMsgRate + " msgs/sec";
             colour = 0xFFC90000;
-        } else if (!bleConnected) {
+        } else if (!bleConnected.getValue()) {
             title = "Idle";
-            text = "Device is offline or out of range";
+            text = "Car is offline or out of range";
             colour = 0xFFFFFFFF;
         } else if (webSocketState == WS_STATE_CLOSED) {
             title = "Connected";
-            text = "Bluetooth link is available";
+            text = "Car is connected Bluetooth link is available";
             colour = 0xFF0000FF;
         } else {
             title = "Online";
-            text = "Cloud link is available";
+            text = "Car is online";
             colour = 0xFF00FF00;
         }
-        return new NotificationCompat.Builder(this, CHANNEL_ID)
-            .setSmallIcon(R.drawable.ic_broken_image_red_24dp)
+        return new NotificationCompat.Builder(this, SERVICE_CHANNEL_ID)
+            .setSmallIcon(R.drawable.ic_swap_horiz_black_24dp)
             .setColor(colour)
             .setContentTitle(title)
             .setContentText(text)
@@ -575,6 +660,38 @@ public class RelayService extends Service {
         NotificationManager manager = ((NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE));
         if (manager != null) {
             manager.notify(SERVICE_NOTIFICATION_ID, createServiceNotification());
+        }
+    }
+
+    void showInstrumentCluster() {
+        NotificationManager manager = ((NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE));
+        if (manager == null) {
+            Log.e(TAG, "Notification manager not available");
+            return;
+        }
+
+        Intent fullScreenIntent = new Intent(this, InstrumentClusterActivity.class);
+        PendingIntent fullScreenPendingIntent = PendingIntent.getActivity(this, 0,
+                fullScreenIntent, PendingIntent.FLAG_UPDATE_CURRENT);
+
+        Notification notification  = new NotificationCompat.Builder(this, INSTRUMENT_CLUSTER_CHANNEL_ID)
+            .setSmallIcon(R.drawable.ic_swap_horiz_black_24dp)
+            .setContentTitle("Onyx M2")
+            .setContentTitle("Instrument Cluster")
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .setFullScreenIntent(fullScreenPendingIntent, true)
+            .build();
+
+        manager.notify(INSTRUMENT_CLUSTER_NOTIFICATION_ID, notification);
+    }
+
+    void hideInstrumentCluster() {
+        // dismiss the notification that probably started the activity, as the fullscreen
+        // intent is being used a vehicle to launch the activity from the background, it's not
+        // a real notification, and should never be visible as such
+        NotificationManager manager = ((NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE));
+        if (manager != null) {
+            manager.cancel(INSTRUMENT_CLUSTER_NOTIFICATION_ID);
         }
     }
 }
