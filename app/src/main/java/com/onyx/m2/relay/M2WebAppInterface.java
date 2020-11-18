@@ -1,7 +1,11 @@
 package com.onyx.m2.relay;
 
+import android.content.Context;
+import android.content.SharedPreferences;
 import android.util.Log;
 import android.webkit.JavascriptInterface;
+
+import androidx.preference.PreferenceManager;
 
 import org.greenrobot.eventbus.EventBus;
 import org.json.JSONArray;
@@ -9,6 +13,19 @@ import org.json.JSONException;
 
 public class M2WebAppInterface {
     private static final String TAG = "M2WebAppInterface";
+    private Context context;
+
+    public M2WebAppInterface(Context context) {
+        this.context = context;
+    }
+
+    /** Get a preference value. This allows the web app to have the same access to the
+     *  configuration as the native side does. */
+    @JavascriptInterface
+    public String getPreference(String name) {
+        SharedPreferences settings = PreferenceManager.getDefaultSharedPreferences(context);
+        return settings.getString(name, "");
+    }
 
     /** Send a command to M2 using direct interface. */
     @JavascriptInterface

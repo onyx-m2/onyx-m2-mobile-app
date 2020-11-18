@@ -55,6 +55,7 @@ public class InstrumentClusterActivity extends AppCompatActivity {
         }
     };
 
+    @SuppressLint("SetJavaScriptEnabled")
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         Log.d(TAG, "Create");
@@ -92,12 +93,12 @@ public class InstrumentClusterActivity extends AppCompatActivity {
         settings.setDomStorageEnabled(true);
 
         // inject our M2 interface into the JS namespace
-        webView.addJavascriptInterface(new M2WebAppInterface(), "M2");
+        webView.addJavascriptInterface(new M2WebAppInterface(this), "M2");
 
         // launch the web app, using black as the background colour to avoid a white flash
         // during load
         webView.setBackgroundColor(Color.BLACK);
-        webView.loadUrl("https://johnmccalla.ngrok.io/hud");
+        webView.loadUrl("https://eic.onyx-m2-dashboard.net/");
     }
 
     @Override
@@ -143,8 +144,6 @@ public class InstrumentClusterActivity extends AppCompatActivity {
      *   window.addEventListener('m2', ({ detail: [ ts, bus, id, data ] }) => {
      *     console.log(`ts: ${ts}, bus: ${bus}, id: ${id}, data: ${data}`)
      *   })
-     *
-     * @param msg
      */
     @SuppressLint("DefaultLocale")
     @Subscribe(threadMode = ThreadMode.MAIN)
