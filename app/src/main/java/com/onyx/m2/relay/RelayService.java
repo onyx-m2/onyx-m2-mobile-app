@@ -35,6 +35,8 @@ import androidx.core.app.NotificationCompat;
 import androidx.lifecycle.MutableLiveData;
 import androidx.preference.PreferenceManager;
 
+import org.greenrobot.eventbus.EventBus;
+import org.greenrobot.eventbus.Subscribe;
 import org.jetbrains.annotations.NotNull;
 
 import java.util.Collections;
@@ -107,6 +109,7 @@ public class RelayService extends Service {
     private int webSocketMsgRate;
     private int webSocketMsgCount;
     private Handler webSocketMsgCountHandler;
+    boolean webSocketMessagesDisabled;
 
     private IBinder binder = new RelayBinder();
     public class RelayBinder extends Binder {
@@ -114,12 +117,6 @@ public class RelayService extends Service {
             return RelayService.this;
         }
     };
-
-    public static final int MSG_BLE_CONNECTED = 1;
-    public static final int MSG_BLE_DISCONNECTED = 2;
-    public static final int MSG_WS_CONNECTED = 3;
-    public static final int MSG_WS_DISCONNECTED = 4;
-    public static final int MSG_DATA = 5;
 
     private MutableLiveData<Boolean> bleConnected;
     public MutableLiveData<Boolean> getBleConnected() {
@@ -135,18 +132,6 @@ public class RelayService extends Service {
     public MutableLiveData<Boolean> getInHolder() {
         return inHolder;
     }
-
-/*
-    private MutableLiveData<byte[]> m2Message;
-    public MutableLiveData<byte[]> getM2Message() {
-        return m2Message;
-    }
-
-    private MutableLiveData<byte[]> m2Command;
-    public MutableLiveData<byte[]> getM2Command() {
-        return m2Command;
-    }
-*/
 
     // We need to listen for wifi coming up because by default, the os will happily continue to
     // service the web socket using the LTE interface even wifi becomes available. So, we'll
@@ -199,7 +184,7 @@ public class RelayService extends Service {
                 else if (action.equals(Intent.ACTION_BATTERY_CHANGED) && showInstrumentClusterOnNextBatteryChange) {
                     showInstrumentClusterOnNextBatteryChange = false;
                     int pluggedState = intent.getIntExtra(BatteryManager.EXTRA_PLUGGED, 0);
-                    if (pluggedState == BatteryManager.BATTERY_PLUGGED_AC /*WIRELESS*/) {
+                    if (pluggedState == BatteryManager.BATTERY_PLUGGED_WIRELESS) {
                         Log.d(TAG, "Plugged into wireless");
                         inHolder.postValue(true);
                         /*Display display = ((WindowManager)getSystemService(WINDOW_SERVICE)).getDefaultDisplay();
@@ -226,7 +211,7 @@ public class RelayService extends Service {
 
         bleConnected = new MutableLiveData<>(false);
         webSocketConnected = new MutableLiveData<>(false);
-        inHolder = new MutableLiveData<>(false);
+        inHolder = new MutableLiveData<>();
         inHolder.observeForever(value -> {
             Log.d(TAG, "InHolder onChanged");
             if (value) {
@@ -235,23 +220,7 @@ public class RelayService extends Service {
                 hideInstrumentCluster();
             }
         });
-/*
-        m2Message = new MutableLiveData<>();
-        m2Command = new MutableLiveData<>();
-        m2Command.observeForever(command -> {
-            Log.d(TAG, "M2Command onChanged");
-            if (gattServer != null && commandCharacteristic != null) {
-                commandCharacteristic.setValue(command);
-                if (!gattServer.writeCharacteristic(commandCharacteristic)) {
-                    Log.d(TAG, "Queueing command because writing failed");
-                    commandQueue.add(command);
-                }
-            }
-            else {
-                Log.d(TAG, "Ignoring command because m2 is not connected");
-            }
-        });
-*/
+
         commandQueue = new LinkedList<>();
         configQueue = new LinkedList<>();
 
@@ -284,6 +253,8 @@ public class RelayService extends Service {
         batteryIntentFilter.addAction(Intent.ACTION_BATTERY_CHANGED);
         registerReceiver(batteryBroadcastReceiver, batteryIntentFilter);
 
+        EventBus.getDefault().register(this);
+
         Toast.makeText(this, "Onyx Relay Started", Toast.LENGTH_LONG).show();
     }
 
@@ -304,6 +275,8 @@ public class RelayService extends Service {
 
         unregisterReceiver(wifiBroadcastReceiver);
         unregisterReceiver(batteryBroadcastReceiver);
+
+        EventBus.getDefault().unregister(this);
     }
 
     @Override
@@ -336,6 +309,15 @@ public class RelayService extends Service {
     public boolean onUnbind(Intent intent) {
         Log.d(TAG, "Unbind");
         return true;
+    }
+
+    @Subscribe
+    public void onM2Command(M2Command command) {
+        commandCharacteristic.setValue(command.data);
+        if (!gattServer.writeCharacteristic(commandCharacteristic)) {
+            Log.d(TAG, "Queueing command because writing failed");
+            commandQueue.add(command.data);
+        }
     }
 
     ScanCallback scanCallback = new ScanCallback() {
@@ -448,15 +430,17 @@ public class RelayService extends Service {
                 Log.w(TAG, "Ignoring empty characteristic value");
                 return;
             }
-            //m2Message.postValue(data);
-            if (webSocketState == WS_STATE_CLOSED) {
-                Log.w(TAG, "Incoming message not sent to web socket that is down");
-                return;
+            M2Message message = new M2Message(data);
+            Log.i(TAG, String.format("m2 -> ts: %d, bus: %d, id: %d", message.ts, message.bus, message.id));
+            EventBus.getDefault().post(message);
+            if (!webSocketMessagesDisabled) {
+                if (webSocketState == WS_STATE_CLOSED) {
+                    Log.w(TAG, "Incoming message not sent to web socket that is down");
+                    return;
+                }
+                webSocket.send(ByteString.of(data));
+                webSocketMsgCount++;
             }
-            ByteString bytes = ByteString.of(data);
-            Log.i(TAG, String.format("m2 <- (%d) %s", bytes.size(), bytes.hex()));
-            webSocket.send(bytes);
-            webSocketMsgCount++;
         }
 
         @Override
@@ -490,12 +474,21 @@ public class RelayService extends Service {
         @Override
         public void onMessage(@NotNull WebSocket ws, ByteString bytes) {
             Log.i(TAG, String.format("m2 <- (%d) %s", bytes.size(), bytes.hex()));
-            byte[] command = bytes.toByteArray();
-            commandCharacteristic.setValue(command);
-            if (!gattServer.writeCharacteristic(commandCharacteristic)) {
-                Log.d(TAG, "Queueing command because writing failed");
-                commandQueue.add(command);
+            byte[] data = bytes.toByteArray();
+
+            // temporary patch: if the server is disabling all messages (because all local
+            // its clients have stopped, set a flag to save bandwidth but don't actually
+            // forward to M2 because direct interface still needs these; only way to do this
+            // properly is to manage clientIds in the firmware
+            M2Command command = new M2Command(data);
+            if (command.isDisableAllMessages()) {
+                webSocketMessagesDisabled = true;
             }
+            else {
+                webSocketMessagesDisabled = false;
+                EventBus.getDefault().post(command);
+            }
+
         }
 
         // Remote is closing the connection
@@ -629,7 +622,7 @@ public class RelayService extends Service {
     Notification createServiceNotification() {
         String title;
         String text;
-        int colour;
+        int colour = 0xFFFFFFFF;;
         if (webSocketMsgRate > 0) {
             title = "Active";
             text = "Relaying " + webSocketMsgRate + " msgs/sec";
@@ -637,15 +630,12 @@ public class RelayService extends Service {
         } else if (!bleConnected.getValue()) {
             title = "Idle";
             text = "Car is offline or out of range";
-            colour = 0xFFFFFFFF;
         } else if (webSocketState == WS_STATE_CLOSED) {
             title = "Connected";
-            text = "Car is connected Bluetooth link is available";
-            colour = 0xFF0000FF;
+            text = "Car is connected";
         } else {
             title = "Online";
             text = "Car is online";
-            colour = 0xFF00FF00;
         }
         return new NotificationCompat.Builder(this, SERVICE_CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_swap_horiz_black_24dp)
@@ -671,6 +661,7 @@ public class RelayService extends Service {
         }
 
         Intent fullScreenIntent = new Intent(this, InstrumentClusterActivity.class);
+        fullScreenIntent.setAction("onyx.intent.action.IN_HOLDER");
         PendingIntent fullScreenPendingIntent = PendingIntent.getActivity(this, 0,
                 fullScreenIntent, PendingIntent.FLAG_UPDATE_CURRENT);
 

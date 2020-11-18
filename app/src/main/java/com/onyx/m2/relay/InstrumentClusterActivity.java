@@ -2,26 +2,25 @@ package com.onyx.m2.relay;
 
 import androidx.appcompat.app.AppCompatActivity;
 
+import android.annotation.SuppressLint;
 import android.app.KeyguardManager;
-import android.app.NotificationManager;
 import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
-import android.content.IntentFilter;
 import android.content.ServiceConnection;
 import android.graphics.Color;
 import android.os.Bundle;
-import android.os.Handler;
 import android.os.IBinder;
-import android.os.Message;
-import android.os.Messenger;
 import android.util.Log;
 import android.view.View;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
 
-import com.onyx.m2.relay.R;
-import com.onyx.m2.relay.RelayService;
+import org.greenrobot.eventbus.EventBus;
+import org.greenrobot.eventbus.Subscribe;
+import org.greenrobot.eventbus.ThreadMode;
+
+import java.util.Arrays;
 
 /**
  * The instrument cluster used to display the realtime gauges in a web view. It hides the system
@@ -32,6 +31,7 @@ import com.onyx.m2.relay.RelayService;
 public class InstrumentClusterActivity extends AppCompatActivity {
     private static final String TAG = "InstrumentClusterActivity";
 
+    private WebView webView;
     private RelayService relayService;
     private ServiceConnection relayConnection = new ServiceConnection() {
 
@@ -39,8 +39,12 @@ public class InstrumentClusterActivity extends AppCompatActivity {
             Log.d(TAG, "Service connected");
             relayService = ((RelayService.RelayBinder) binder).getService();
             relayService.getInHolder().observe(InstrumentClusterActivity.this, value -> {
+                Log.d(TAG, "InHolder Changed: " + value);
                 if (!value) {
-                    finishAndRemoveTask();
+                    String action = getIntent().getAction();
+                    if (action != null && action.equals("onyx.intent.action.IN_HOLDER")) {
+                        finishAndRemoveTask();
+                    }
                 }
             });
         }
@@ -53,6 +57,7 @@ public class InstrumentClusterActivity extends AppCompatActivity {
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
+        Log.d(TAG, "Create");
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_instrument_cluster);
 
@@ -68,7 +73,7 @@ public class InstrumentClusterActivity extends AppCompatActivity {
 
         // setup the web view to display fullscreen and "immersive", that is, no other
         // screen clutter like the top status bar or bottom navigation buttons
-        WebView webView = (WebView)findViewById(R.id.fullscreen_content);
+        webView = (WebView)findViewById(R.id.fullscreen_content);
         webView.setSystemUiVisibility(View.SYSTEM_UI_FLAG_LOW_PROFILE
                 | View.SYSTEM_UI_FLAG_FULLSCREEN
                 | View.SYSTEM_UI_FLAG_LAYOUT_STABLE
@@ -86,6 +91,9 @@ public class InstrumentClusterActivity extends AppCompatActivity {
         settings.setJavaScriptEnabled(true);
         settings.setDomStorageEnabled(true);
 
+        // inject our M2 interface into the JS namespace
+        webView.addJavascriptInterface(new M2WebAppInterface(), "M2");
+
         // launch the web app, using black as the background colour to avoid a white flash
         // during load
         webView.setBackgroundColor(Color.BLACK);
@@ -95,30 +103,54 @@ public class InstrumentClusterActivity extends AppCompatActivity {
     @Override
     protected void onStart() {
         Log.d(TAG, "Start");
+        super.onStart();
         Intent intent = new Intent(this, RelayService.class);
         bindService(intent, relayConnection, Context.BIND_AUTO_CREATE);
-        super.onStart();
+        EventBus.getDefault().register(this);
+    }
+
+    @Override
+    public void onUserInteraction() {
+        webView.reload();
     }
 
     @Override
     protected void onStop() {
         Log.d(TAG, "Stop");
+        super.onStop();
         unbindService(relayConnection);
         finishAndRemoveTask();
-        super.onStop();
+        EventBus.getDefault().unregister(this);
     }
 
     @Override
     protected void onDestroy() {
         Log.d(TAG, "Destroy");
+
+        // no idea why the webview needs to be explicitly destroyed, but it does; failure
+        // to do this will result in the M2 continuing to send events forever
+        webView.destroy();
+
         super.onDestroy();
     }
 
-    private void processMessage(byte[] data) {
-        int ts = data[0] | (data[1] << 8) | (data[2] << 16) | (data[3] << 24);
-        int bus = data[4];
-        int id = data[5] | (data[6] << 8);
-        int len = data[7];
-        //((TextView)findViewById(R.id.fullscreen_content)).setText("id: " + id);
+    /**
+     * An M2 message is emitted into the event bus. The creative way this is sent to the
+     * Javascript side is needed as any function that looks like it's not being called in
+     * the Javascript world will get minified away by Webpack. By using the window's event
+     * system, this is prevented. The Javascript to receive these events looks like this:
+     *
+     *   window.addEventListener('m2', ({ detail: [ ts, bus, id, data ] }) => {
+     *     console.log(`ts: ${ts}, bus: ${bus}, id: ${id}, data: ${data}`)
+     *   })
+     *
+     * @param msg
+     */
+    @SuppressLint("DefaultLocale")
+    @Subscribe(threadMode = ThreadMode.MAIN)
+    public void onM2Message(M2Message msg) {
+        Log.d(TAG, "M2 Message ts: " + msg.ts + ", bus: " + msg.bus + ", id: " + msg.id);
+        webView.evaluateJavascript(String.format("window.dispatchEvent(new CustomEvent('m2', { detail: [%d, %d, %d, %s] }))",
+                msg.ts, msg.bus, msg.id, Arrays.toString(msg.data)), null);
     }
 }
