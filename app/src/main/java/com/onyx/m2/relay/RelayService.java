@@ -109,14 +109,14 @@ public class RelayService extends Service {
     private int webSocketMsgRate;
     private int webSocketMsgCount;
     private Handler webSocketMsgCountHandler;
-    boolean webSocketMessagesDisabled;
+    boolean webSocketMessagesEnabled;
 
     private IBinder binder = new RelayBinder();
     public class RelayBinder extends Binder {
         public RelayService getService() {
             return RelayService.this;
         }
-    };
+    }
 
     private MutableLiveData<Boolean> bleConnected;
     public MutableLiveData<Boolean> getBleConnected() {
@@ -433,7 +433,7 @@ public class RelayService extends Service {
             M2Message message = new M2Message(data);
             Log.i(TAG, String.format("m2 -> ts: %d, bus: %d, id: %d", message.ts, message.bus, message.id));
             EventBus.getDefault().post(message);
-            if (!webSocketMessagesDisabled) {
+            if (webSocketMessagesEnabled) {
                 if (webSocketState == WS_STATE_CLOSED) {
                     Log.w(TAG, "Incoming message not sent to web socket that is down");
                     return;
@@ -482,10 +482,10 @@ public class RelayService extends Service {
             // properly is to manage clientIds in the firmware
             M2Command command = new M2Command(data);
             if (command.isDisableAllMessages()) {
-                webSocketMessagesDisabled = true;
+                webSocketMessagesEnabled = false;
             }
             else {
-                webSocketMessagesDisabled = false;
+                webSocketMessagesEnabled = true;
                 EventBus.getDefault().post(command);
             }
 
@@ -622,12 +622,16 @@ public class RelayService extends Service {
     Notification createServiceNotification() {
         String title;
         String text;
-        int colour = 0xFFFFFFFF;;
+        int colour = 0xFFFFFFFF;
+        Boolean connected = bleConnected.getValue();
+        if (connected == null) {
+            connected = false;
+        }
         if (webSocketMsgRate > 0) {
             title = "Active";
             text = "Relaying " + webSocketMsgRate + " msgs/sec";
             colour = 0xFFC90000;
-        } else if (!bleConnected.getValue()) {
+        } else if (!connected) {
             title = "Idle";
             text = "Car is offline or out of range";
         } else if (webSocketState == WS_STATE_CLOSED) {
