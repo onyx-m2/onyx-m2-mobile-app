@@ -1,6 +1,7 @@
 package com.onyx.m2.relay;
 
 import androidx.appcompat.app.AppCompatActivity;
+import androidx.preference.PreferenceManager;
 
 import android.annotation.SuppressLint;
 import android.app.KeyguardManager;
@@ -8,17 +9,21 @@ import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
 import android.content.ServiceConnection;
+import android.content.SharedPreferences;
 import android.graphics.Color;
 import android.os.Bundle;
 import android.os.IBinder;
 import android.util.Log;
 import android.view.View;
+import android.webkit.JavascriptInterface;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
 
 import org.greenrobot.eventbus.EventBus;
 import org.greenrobot.eventbus.Subscribe;
 import org.greenrobot.eventbus.ThreadMode;
+import org.json.JSONArray;
+import org.json.JSONException;
 
 import java.util.Arrays;
 
@@ -31,10 +36,13 @@ import java.util.Arrays;
 public class InstrumentClusterActivity extends AppCompatActivity {
     private static final String TAG = "InstrumentClusterActivity";
 
+    private boolean connected;
+    private SharedPreferences preferences;
     private WebView webView;
     private RelayService relayService;
     private ServiceConnection relayConnection = new ServiceConnection() {
 
+        @SuppressLint("DefaultLocale")
         public void onServiceConnected(ComponentName className, IBinder binder) {
             Log.d(TAG, "Service connected");
             relayService = ((RelayService.RelayBinder) binder).getService();
@@ -45,6 +53,12 @@ public class InstrumentClusterActivity extends AppCompatActivity {
                     if (action != null && action.equals("onyx.intent.action.IN_HOLDER")) {
                         finishAndRemoveTask();
                     }
+                }
+            });
+            relayService.getBleConnected().observe(InstrumentClusterActivity.this, value -> {
+                if (connected != value) {
+                    connected = value;
+                    webView.evaluateJavascript("window.dispatchEvent(new CustomEvent('m2status', { detail: [" + value + ", 0, 0] }))", null);
                 }
             });
         }
@@ -61,6 +75,7 @@ public class InstrumentClusterActivity extends AppCompatActivity {
         Log.d(TAG, "Create");
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_instrument_cluster);
+        preferences = PreferenceManager.getDefaultSharedPreferences(this);
 
         // in order to show when the phone is "off and/or locked", the screen must be turned on,
         // this activity must flag itself as being allowed to show on the lock screen, and the
@@ -74,13 +89,13 @@ public class InstrumentClusterActivity extends AppCompatActivity {
 
         // setup the web view to display fullscreen and "immersive", that is, no other
         // screen clutter like the top status bar or bottom navigation buttons
-        webView = (WebView)findViewById(R.id.fullscreen_content);
+        webView = findViewById(R.id.fullscreen_content);
         webView.setSystemUiVisibility(View.SYSTEM_UI_FLAG_LOW_PROFILE
-                | View.SYSTEM_UI_FLAG_FULLSCREEN
-                | View.SYSTEM_UI_FLAG_LAYOUT_STABLE
-                | View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
-                | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
-                | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION);
+            | View.SYSTEM_UI_FLAG_FULLSCREEN
+            | View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+            | View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
+            | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
+            | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION);
 
         // to run in hud mode (projected onto the windshield), the interface would need to
         // be flipped horizontally
@@ -93,7 +108,7 @@ public class InstrumentClusterActivity extends AppCompatActivity {
         settings.setDomStorageEnabled(true);
 
         // inject our M2 interface into the JS namespace
-        webView.addJavascriptInterface(new M2WebAppInterface(this), "M2");
+        webView.addJavascriptInterface(this, "M2");
 
         // launch the web app, using black as the background colour to avoid a white flash
         // during load
@@ -149,7 +164,40 @@ public class InstrumentClusterActivity extends AppCompatActivity {
     @Subscribe(threadMode = ThreadMode.MAIN)
     public void onM2Message(M2Message msg) {
         Log.d(TAG, "M2 Message ts: " + msg.ts + ", bus: " + msg.bus + ", id: " + msg.id);
-        webView.evaluateJavascript(String.format("window.dispatchEvent(new CustomEvent('m2', { detail: [%d, %d, %d, %s] }))",
+        webView.evaluateJavascript(String.format("window.dispatchEvent(new CustomEvent('m2message', { detail: [%d, %d, %d, %s] }))",
                 msg.ts, msg.bus, msg.id, Arrays.toString(msg.data)), null);
+    }
+
+    /** Get a preference value. This allows the web app to have the same access to the
+     *  configuration as the native side does. */
+    @JavascriptInterface
+    public String getPreference(String name) {
+        Log.d(TAG, "getPreference: " + name);
+        return preferences.getString(name, "");
+    }
+
+    /** Get a preference value. This allows the web app to have the same access to the
+     *  configuration as the native side does. */
+    @JavascriptInterface
+    public boolean isConnected() {
+        Log.d(TAG, "isConnected: " + connected);
+        return connected;
+    }
+
+    /** Send a command to M2 using direct interface. */
+    @JavascriptInterface
+    public void sendCommand(String array) {
+        Log.d(TAG, "sendCommand: " + array);
+        try {
+            JSONArray json = new JSONArray(array);
+            byte[] data = new byte[json.length()];
+            for (int i = 0; i < data.length; i++) {
+                data[i] = (byte) json.getInt(i);
+            }
+            EventBus.getDefault().post(new M2Command(data));
+        }
+        catch (JSONException e) {
+            Log.e(TAG, "Invalid command: " + array);
+        }
     }
 }
