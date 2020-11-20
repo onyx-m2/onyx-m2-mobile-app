@@ -79,4 +79,31 @@
 
     </PreferenceCategory>
 
+    <PreferenceCategory
+        android:key="eic_settings"
+        android:title="Instrument Cluster"
+        app:iconSpaceReserved="false">
+
+        <SwitchPreferenceCompat
+            app:key="eic_use_development"
+            app:title="Use development app"
+            app:iconSpaceReserved="false"/>
+
+        <EditTextPreference
+            app:key="eic_hostname"
+            app:title="Hostname"
+            android:dialogTitle="Enter the hostname of your production EIC app"
+            android:defaultValue="eic.onyx-m2-dashboard.net"
+            app:useSimpleSummaryProvider="true"
+            app:iconSpaceReserved="false"/>
+
+        <EditTextPreference
+            app:key="eic_development_hostname"
+            app:title="Development App URL"
+            android:dialogTitle="Enter the hostname of your development EIC app"
+            app:useSimpleSummaryProvider="true"
+            app:iconSpaceReserved="false"/>
+
+    </PreferenceCategory>
+
 </androidx.preference.PreferenceScreen>

@@ -26,6 +26,10 @@ import org.json.JSONArray;
 import org.json.JSONException;
 
 import java.util.Arrays;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.TimeUnit;
 
 /**
  * The instrument cluster used to display the realtime gauges in a web view. It hides the system
@@ -39,6 +43,9 @@ public class InstrumentClusterActivity extends AppCompatActivity {
     private boolean connected;
     private SharedPreferences preferences;
     private WebView webView;
+    private final ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();
+    private ScheduledFuture<?> statusUpdaterHandle;
+
     private RelayService relayService;
     private ServiceConnection relayConnection = new ServiceConnection() {
 
@@ -56,16 +63,16 @@ public class InstrumentClusterActivity extends AppCompatActivity {
                 }
             });
             relayService.getBleConnected().observe(InstrumentClusterActivity.this, value -> {
-                if (connected != value) {
-                    connected = value;
-                    webView.evaluateJavascript("window.dispatchEvent(new CustomEvent('m2status', { detail: [" + value + ", 0, 0] }))", null);
-                }
+                connected = value;
+                updateM2Status(connected, 0, 0);
             });
         }
 
         public void onServiceDisconnected(ComponentName className) {
             Log.d(TAG, "Service disconnected");
             relayService = null;
+            connected = false;
+            updateM2Status(false, 0, 0);
         }
     };
 
@@ -110,10 +117,21 @@ public class InstrumentClusterActivity extends AppCompatActivity {
         // inject our M2 interface into the JS namespace
         webView.addJavascriptInterface(this, "M2");
 
-        // launch the web app, using black as the background colour to avoid a white flash
+        // use black as the background colour to avoid a white flash
         // during load
         webView.setBackgroundColor(Color.BLACK);
-        webView.loadUrl("https://eic.onyx-m2-dashboard.net/");
+
+        // determine which app we want to start (dev or prod), enable content debugging if
+        // dev, and load the web view
+        boolean useDevelopment = preferences.getBoolean("eic_use_development", false);
+        String hostname;
+        if (useDevelopment) {
+            hostname = preferences.getString("eic_development_hostname", "");
+            WebView.setWebContentsDebuggingEnabled(true);
+        } else {
+             hostname = preferences.getString("eic_hostname", "");
+        }
+        webView.loadUrl("https://" + hostname);
     }
 
     @Override
@@ -123,6 +141,8 @@ public class InstrumentClusterActivity extends AppCompatActivity {
         Intent intent = new Intent(this, RelayService.class);
         bindService(intent, relayConnection, Context.BIND_AUTO_CREATE);
         EventBus.getDefault().register(this);
+        statusUpdaterHandle = scheduler.scheduleWithFixedDelay(() -> updateM2Status(connected, 0, 0),
+            1, 1, TimeUnit.SECONDS);
     }
 
     @Override
@@ -134,9 +154,10 @@ public class InstrumentClusterActivity extends AppCompatActivity {
     protected void onStop() {
         Log.d(TAG, "Stop");
         super.onStop();
+        statusUpdaterHandle.cancel(false);
+        EventBus.getDefault().unregister(this);
         unbindService(relayConnection);
         finishAndRemoveTask();
-        EventBus.getDefault().unregister(this);
     }
 
     @Override
@@ -164,8 +185,7 @@ public class InstrumentClusterActivity extends AppCompatActivity {
     @Subscribe(threadMode = ThreadMode.MAIN)
     public void onM2Message(M2Message msg) {
         Log.d(TAG, "M2 Message ts: " + msg.ts + ", bus: " + msg.bus + ", id: " + msg.id);
-        webView.evaluateJavascript(String.format("window.dispatchEvent(new CustomEvent('m2message', { detail: [%d, %d, %d, %s] }))",
-                msg.ts, msg.bus, msg.id, Arrays.toString(msg.data)), null);
+        sendM2Event("message", String.format("[%d, %d, %d, %s]", msg.ts, msg.bus, msg.id, Arrays.toString(msg.data)));
     }
 
     /** Get a preference value. This allows the web app to have the same access to the
@@ -176,18 +196,14 @@ public class InstrumentClusterActivity extends AppCompatActivity {
         return preferences.getString(name, "");
     }
 
-    /** Get a preference value. This allows the web app to have the same access to the
-     *  configuration as the native side does. */
-    @JavascriptInterface
-    public boolean isConnected() {
-        Log.d(TAG, "isConnected: " + connected);
-        return connected;
-    }
-
     /** Send a command to M2 using direct interface. */
     @JavascriptInterface
     public void sendCommand(String array) {
         Log.d(TAG, "sendCommand: " + array);
+        if (!connected) {
+            Log.e(TAG, "Attempting to send M2 a command while its not connected: " + array);
+            return;
+        }
         try {
             JSONArray json = new JSONArray(array);
             byte[] data = new byte[json.length()];
@@ -200,4 +216,23 @@ public class InstrumentClusterActivity extends AppCompatActivity {
             Log.e(TAG, "Invalid command: " + array);
         }
     }
+
+    /**
+     * Set the connect state, updating the web app in the process.
+     */
+    @SuppressLint("DefaultLocale")
+    void updateM2Status(boolean connected, int latency, int rate) {
+        sendM2Event("status", String.format("[%b, %d, %d]", connected, latency, rate));
+    }
+
+    /**
+     * Send an M2 event to the web app. The event must be a single word, and the data should be
+     * valid Javascript for a primitive value, an object, or an array.
+     */
+    void sendM2Event(String event, String data) {
+        String command = String.format("window.dispatchEvent(new CustomEvent('m2', { detail: { event: '%s', data: %s }}))",
+            event, data);
+        runOnUiThread(() -> webView.evaluateJavascript(command, null));
+    }
+
 }

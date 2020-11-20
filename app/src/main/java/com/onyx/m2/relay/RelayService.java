@@ -43,9 +43,9 @@ import java.util.Collections;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.Queue;
-import java.util.Timer;
-import java.util.TimerTask;
 import java.util.UUID;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 
 import okhttp3.OkHttpClient;
@@ -111,6 +111,8 @@ public class RelayService extends Service {
     private Handler webSocketMsgCountHandler;
     boolean webSocketMessagesEnabled;
 
+    private final ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();
+
     private IBinder binder = new RelayBinder();
     public class RelayBinder extends Binder {
         public RelayService getService() {
@@ -148,12 +150,9 @@ public class RelayService extends Service {
                     Log.d(TAG, "Wifi state enabled");
                     if (webSocketState == WS_STATE_OPEN) {
                         Log.i(TAG, "Scheduling cycling web socket connection in 5s");
-                        new Timer().schedule(new TimerTask() {
-                            @Override
-                            public void run() {
-                                webSocket.close(WEBSOCKET_NORMAL_CLOSURE_STATUS, "Switching to wifi");
-                            }
-                        }, 5000);
+                        scheduler.schedule(() -> {
+                            webSocket.close(WEBSOCKET_NORMAL_CLOSURE_STATUS, "Switching to wifi");
+                        }, 5, TimeUnit.SECONDS);
                     }
                 }
             }
@@ -168,7 +167,7 @@ public class RelayService extends Service {
     private BroadcastReceiver batteryBroadcastReceiver = new BroadcastReceiver() {
         @Override
         public void onReceive(Context context, Intent intent) {
-            Log.d(TAG, "Battery broadcast receive");
+            Log.v(TAG, "Battery broadcast receive");
             String action = intent.getAction();
             if (action != null) {
                 if (action.equals(Intent.ACTION_POWER_CONNECTED)) {
@@ -509,12 +508,7 @@ public class RelayService extends Service {
                 webSocket.close(WEBSOCKET_NORMAL_CLOSURE_STATUS, t.getMessage());
                 webSocket = null;
                 setWebSocketState(WS_STATE_CLOSED, true);
-                new Timer().schedule(new TimerTask() {
-                    @Override
-                    public void run() {
-                        connectWebSocket();
-                    }
-                }, 1000);
+                scheduler.schedule(() -> connectWebSocket(), 1, TimeUnit.SECONDS);
             }
         }
 

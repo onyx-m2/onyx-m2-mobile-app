@@ -37,7 +37,8 @@
                 android:layout_weight="1"
                 android:alpha="0.5"
                 android:visibility="visible"
-                app:srcCompat="@drawable/ic_bluetooth_24px" />
+                app:srcCompat="@drawable/ic_bluetooth_24px"
+                android:contentDescription="@string/bluetooth_device_icon" />
 
             <ImageView
                 android:id="@+id/bleConnectedImage"
@@ -47,14 +48,16 @@
                 android:layout_weight="1"
                 android:baselineAlignBottom="false"
                 android:visibility="invisible"
-                app:srcCompat="@drawable/ic_sync_alt_24px" />
+                app:srcCompat="@drawable/ic_sync_alt_24px"
+                android:contentDescription="@string/bluetooth_connection_icon" />
 
             <ImageView
                 android:id="@+id/phoneImage"
                 android:layout_width="40dp"
                 android:layout_height="40dp"
                 android:layout_weight="1"
-                app:srcCompat="@drawable/ic_smartphone_24px" />
+                app:srcCompat="@drawable/ic_smartphone_24px"
+                android:contentDescription="@string/phone_device_icon" />
 
             <ImageView
                 android:id="@+id/wsConnectedImage"
@@ -64,7 +67,8 @@
                 android:layout_weight="1"
                 android:baselineAlignBottom="false"
                 android:visibility="invisible"
-                app:srcCompat="@drawable/ic_sync_alt_24px" />
+                app:srcCompat="@drawable/ic_sync_alt_24px"
+                android:contentDescription="@string/cloud_connection_icon" />
 
             <ImageView
                 android:id="@+id/wsImage"
@@ -72,7 +76,8 @@
                 android:layout_height="40dp"
                 android:layout_weight="1"
                 android:alpha="0.5"
-                app:srcCompat="@drawable/ic_cloud_queue_24px" />
+                app:srcCompat="@drawable/ic_cloud_queue_24px"
+                android:contentDescription="@string/cloud_server_icon" />
 
         </LinearLayout>
 

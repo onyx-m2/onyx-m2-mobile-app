@@ -8,4 +8,9 @@
     <string name="dummy_button">Dummy Button</string>
     <string name="dummy_content">DUMMY\nCONTENT</string>
     <string name="title_activity_instrument_cluster">FullscreenActivity</string>
+    <string name="bluetooth_connection_icon">Bluetooth connection icon</string>
+    <string name="bluetooth_device_icon">Bluetooth device icon</string>
+    <string name="phone_device_icon">Phone device icon</string>
+    <string name="cloud_connection_icon">Cloud connection icon</string>
+    <string name="cloud_server_icon">Cloud server icon</string>
 </resources>
