@@ -146,11 +146,6 @@ public class InstrumentClusterActivity extends AppCompatActivity {
     }
 
     @Override
-    public void onUserInteraction() {
-        webView.reload();
-    }
-
-    @Override
     protected void onStop() {
         Log.d(TAG, "Stop");
         super.onStop();
