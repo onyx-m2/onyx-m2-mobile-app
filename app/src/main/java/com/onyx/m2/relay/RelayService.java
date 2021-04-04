@@ -164,6 +164,7 @@ public class RelayService extends Service {
     // instrument cluster when the phone is placed into the car mount holder (in all my other
     // wireless chargers, the phone sits upright).
     private boolean showInstrumentClusterOnNextBatteryChange = false;
+    private boolean delayedRemovalFromHolder = false;
     private BroadcastReceiver batteryBroadcastReceiver = new BroadcastReceiver() {
         @Override
         public void onReceive(Context context, Intent intent) {
@@ -173,12 +174,25 @@ public class RelayService extends Service {
                 if (action.equals(Intent.ACTION_POWER_CONNECTED)) {
                     Log.d(TAG, "Power connected");
                     // this is necessary because BATTERY_PLUGGED_WIRELESS extra is only sent
-                    // the ACTION_BATTERY_CHANGED
-                    showInstrumentClusterOnNextBatteryChange = true;
+                    // with the ACTION_BATTERY_CHANGED event
+                    if (!delayedRemovalFromHolder) {
+                        showInstrumentClusterOnNextBatteryChange = true;
+                    }
+                    delayedRemovalFromHolder = false;
                 }
                 else if (action.equals(Intent.ACTION_POWER_DISCONNECTED)) {
                     Log.d(TAG, "Power disconnected");
-                    inHolder.postValue(false);
+                    // the delay is to compensate for the fact that the charger occasionally
+                    // disconnects and reconnects immediately; not sure if this is caused by
+                    // road vibration, or just something that happens regularly but you never
+                    // notice
+                    delayedRemovalFromHolder = true;
+                    scheduler.schedule(() -> {
+                        if (delayedRemovalFromHolder) {
+                            inHolder.postValue(false);
+                            delayedRemovalFromHolder = false;
+                        }
+                    }, 3, TimeUnit.SECONDS);
                 }
                 else if (action.equals(Intent.ACTION_BATTERY_CHANGED) && showInstrumentClusterOnNextBatteryChange) {
                     showInstrumentClusterOnNextBatteryChange = false;
@@ -676,7 +690,7 @@ public class RelayService extends Service {
 
     void hideInstrumentCluster() {
         // dismiss the notification that probably started the activity, as the fullscreen
-        // intent is being used a vehicle to launch the activity from the background, it's not
+        // intent is being used in vehicle to launch the activity from the background, it's not
         // a real notification, and should never be visible as such
         NotificationManager manager = ((NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE));
         if (manager != null) {
